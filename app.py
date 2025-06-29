@@ -12,14 +12,18 @@ import time
 # Load environment variables from .env file
 load_dotenv()
 
+# Check if AI should be disabled (for testing or memory issues)
+USE_AI = os.getenv("USE_AI", "true").lower() == "true"
+
 # Configure the Google Gemini API
-try:
-    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-    # Don't load the model at startup - we'll load it when needed
-except Exception as e:
-    print(f"Error configuring Gemini API: {e}")
-    print("Please ensure GOOGLE_API_KEY is set correctly in your .env file.")
-    exit(1)
+if USE_AI:
+    try:
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        # Don't load the model at startup - we'll load it when needed
+    except Exception as e:
+        print(f"Error configuring Gemini API: {e}")
+        print("Please ensure GOOGLE_API_KEY is set correctly in your .env file.")
+        USE_AI = False  # Fallback to non-AI mode
 
 # Get Unsplash Access Key
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
@@ -41,12 +45,22 @@ def get_gemini_model():
     global _gemini_model
     if _gemini_model is None:
         try:
-            _gemini_model = genai.GenerativeModel('gemini-2.5-pro')
+            # Use a smaller model for Render's memory constraints
+            _gemini_model = genai.GenerativeModel('gemini-1.5-flash')
             print("Gemini model loaded successfully")
         except Exception as e:
             print(f"Error creating Gemini model: {e}")
             raise
     return _gemini_model
+
+def cleanup_model():
+    """Clean up the model to free memory."""
+    global _gemini_model
+    if _gemini_model is not None:
+        _gemini_model = None
+        import gc
+        gc.collect()
+        print("Model cleaned up and memory freed")
 
 def generate_with_gemini(prompt, max_retries=3):
     """Generate content with retry logic and better error handling."""
@@ -54,14 +68,32 @@ def generate_with_gemini(prompt, max_retries=3):
         try:
             model = get_gemini_model()
             response = model.generate_content(prompt)
-            return response.text
+            result = response.text
+            
+            # Clean up after each generation to free memory
+            cleanup_model()
+            
+            return result
         except Exception as e:
             print(f"Attempt {attempt + 1} failed: {e}")
+            cleanup_model()  # Clean up on error too
             if attempt == max_retries - 1:
                 raise
             # Wait a bit before retrying
-            time.sleep(1)
+            time.sleep(2)  # Increased wait time
     return None
+
+def generate_fallback_story(prompt, mood):
+    """Generate a simple fallback story if Gemini fails."""
+    fallback_stories = {
+        'fantasy': f"Once upon a time, in a realm where magic flowed like rivers, there lived a brave soul who embarked on a quest about {prompt}. Through enchanted forests and mystical mountains, they discovered that the greatest magic was the power of friendship and determination. Their journey taught them that even the smallest acts of courage could change the world forever.",
+        'scifi': f"In the year 2157, aboard the starship Nebula, Commander Sarah Chen faced an unprecedented challenge: {prompt}. With advanced AI companions and cutting-edge technology, she navigated through quantum anomalies and discovered that the future of humanity depended on understanding the past. The mission would test not just her skills, but her very understanding of reality itself.",
+        'mystery': f"Detective Marcus Blackwood stared at the cryptic message on his desk. The case was unlike any he'd seen before: {prompt}. With his trusty magnifying glass and sharp intuition, he followed the clues through foggy streets and hidden passages. Every shadow held a secret, every whisper a clue. The truth was closer than he imagined.",
+        'adventure': f"Deep in the heart of the Amazon rainforest, explorer Dr. Elena Rodriguez discovered something extraordinary: {prompt}. Armed with nothing but her wits and a backpack of supplies, she ventured into uncharted territory. Through raging rivers and ancient ruins, she uncovered secrets that would rewrite history books.",
+        'romance': f"In a charming little bookstore on a rainy afternoon, Emma and James found themselves drawn together by a shared love of stories. Their connection deepened as they explored the mystery of {prompt}. Through stolen glances and whispered conversations, they discovered that sometimes the greatest love stories are the ones we write ourselves."
+    }
+    
+    return fallback_stories.get(mood, f"Once upon a time, there was a remarkable story about {prompt}. It was a tale of courage, friendship, and discovery that would be remembered for generations to come.")
 
 # Random prompt suggestions
 RANDOM_PROMPTS = [
@@ -158,16 +190,34 @@ def generate_story():
         enhanced_prompt = mood_prompts.get(mood, f"Write an engaging story about: {user_prompt}")
         enhanced_prompt += " Keep the story between 200-400 words, with vivid descriptions and engaging characters."
 
-        # Generate content using the Gemini model
-        generated_text = generate_with_gemini(enhanced_prompt)
+        # Try to generate content using the Gemini model
+        if USE_AI:
+            try:
+                generated_text = generate_with_gemini(enhanced_prompt)
+                if not generated_text:
+                    raise Exception("No response from Gemini")
+            except Exception as gemini_error:
+                print(f"Gemini failed, using fallback: {gemini_error}")
+                generated_text = generate_fallback_story(user_prompt, mood)
+        else:
+            # Use fallback stories when AI is disabled
+            generated_text = generate_fallback_story(user_prompt, mood)
 
         # Generate a title for the story
-        title_prompt = f"Generate a creative, engaging title for this story in 5 words or less: {generated_text[:100]}..."
-        story_title = generate_with_gemini(title_prompt)
-        if story_title:
-            story_title = story_title.strip().strip('"\'')
+        if USE_AI:
+            try:
+                title_prompt = f"Generate a creative, engaging title for this story in 5 words or less: {generated_text[:100]}..."
+                story_title = generate_with_gemini(title_prompt)
+                if story_title:
+                    story_title = story_title.strip().strip('"\'')
+                else:
+                    story_title = "Untitled Story"
+            except Exception as title_error:
+                print(f"Title generation failed: {title_error}")
+                story_title = f"{mood.title()} Adventure"
         else:
-            story_title = "Untitled Story"
+            # Use simple title when AI is disabled
+            story_title = f"{mood.title()} Adventure"
 
         # Create story object
         story_data = {
@@ -242,5 +292,9 @@ def get_story(story_id):
         return jsonify({'error': 'Story not found'}), 404
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Configure for production deployment
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV') == 'development'
+    
+    app.run(host='0.0.0.0', port=port, debug=debug)
 
