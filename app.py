@@ -45,8 +45,10 @@ def get_gemini_model():
     global _gemini_model
     if _gemini_model is None:
         try:
-            # Use a smaller model for Render's memory constraints
-            _gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+            # Get model from environment variable, default to flash for memory efficiency
+            model_name = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
+            print(f"Loading Gemini model: {model_name}")
+            _gemini_model = genai.GenerativeModel(model_name)
             print("Gemini model loaded successfully")
         except Exception as e:
             print(f"Error creating Gemini model: {e}")
