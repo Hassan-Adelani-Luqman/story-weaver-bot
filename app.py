@@ -7,6 +7,7 @@ from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import google.generativeai as genai
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -14,7 +15,7 @@ load_dotenv()
 # Configure the Google Gemini API
 try:
     genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-    gemini_model = genai.GenerativeModel('gemini-2.5-pro')
+    # Don't load the model at startup - we'll load it when needed
 except Exception as e:
     print(f"Error configuring Gemini API: {e}")
     print("Please ensure GOOGLE_API_KEY is set correctly in your .env file.")
@@ -31,6 +32,36 @@ CORS(app)  # Enable CORS for all routes
 
 # In-memory storage for stories (in production, use a database)
 story_archive = []
+
+# Global variable to store the model (lazy loading)
+_gemini_model = None
+
+def get_gemini_model():
+    """Get or create the Gemini model instance (lazy loading)."""
+    global _gemini_model
+    if _gemini_model is None:
+        try:
+            _gemini_model = genai.GenerativeModel('gemini-2.5-pro')
+            print("Gemini model loaded successfully")
+        except Exception as e:
+            print(f"Error creating Gemini model: {e}")
+            raise
+    return _gemini_model
+
+def generate_with_gemini(prompt, max_retries=3):
+    """Generate content with retry logic and better error handling."""
+    for attempt in range(max_retries):
+        try:
+            model = get_gemini_model()
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            if attempt == max_retries - 1:
+                raise
+            # Wait a bit before retrying
+            time.sleep(1)
+    return None
 
 # Random prompt suggestions
 RANDOM_PROMPTS = [
@@ -95,6 +126,15 @@ def index():
     """Serves the main HTML page for the chatbot."""
     return render_template('index.html')
 
+@app.route('/health')
+def health_check():
+    """Health check endpoint for monitoring."""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'stories_count': len(story_archive)
+    })
+
 @app.route('/generate_story', methods=['POST'])
 def generate_story():
     """Handles the story generation request from the frontend."""
@@ -119,13 +159,15 @@ def generate_story():
         enhanced_prompt += " Keep the story between 200-400 words, with vivid descriptions and engaging characters."
 
         # Generate content using the Gemini model
-        gemini_response = gemini_model.generate_content(enhanced_prompt)
-        generated_text = gemini_response.text
+        generated_text = generate_with_gemini(enhanced_prompt)
 
         # Generate a title for the story
         title_prompt = f"Generate a creative, engaging title for this story in 5 words or less: {generated_text[:100]}..."
-        title_response = gemini_model.generate_content(title_prompt)
-        story_title = title_response.text.strip().strip('"\'')
+        story_title = generate_with_gemini(title_prompt)
+        if story_title:
+            story_title = story_title.strip().strip('"\'')
+        else:
+            story_title = "Untitled Story"
 
         # Create story object
         story_data = {

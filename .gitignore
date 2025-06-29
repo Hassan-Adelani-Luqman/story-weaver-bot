@@ -8,6 +8,11 @@
 # Scripts
 setup.sh
 
+# Deployment files (optional - you might want to keep these)
+# Procfile
+# render.yaml
+# runtime.txt
+
 # Python
 __pycache__/
 *.py[cod]
